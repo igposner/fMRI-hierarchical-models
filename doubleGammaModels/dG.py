@@ -76,14 +76,31 @@ stan_data = {
 # %% Fit
 rng = np.random.default_rng()
 
+init = {
+    "mu_tp_dip": 13.0, "mu_tp_bump": 27.0,
+    "sigma_tp_dip": 0.5, "sigma_tp_bump": 0.5,
+    "mu_log_b_dip": -1.5, "mu_log_b_bump": -1.5,
+    "sigma_log_b_dip": 0.1, "sigma_log_b_bump": 0.1,
+    "mu_log_c": 0.0, "sigma_log_c": 0.1,
+    "mu_beta": 0.0, "sigma_beta": 1.0,
+    "tp_dip_raw":   [0.0]*n_patients,
+    "tp_bump_raw":  [0.0]*n_patients,
+    "log_b_dip_raw":[0.0]*n_patients,
+    "log_b_bump_raw":[0.0]*n_patients,
+    "log_c_raw":    [0.0]*n_patients,
+    "beta_raw":     [0.0]*n_patients,
+    "sigma": 1.0,
+}
+
 fit = model.sample(
     data=stan_data,
     chains=4,
     parallel_chains=4,
-    iter_sampling=1000,
-    iter_warmup=1000,
+    iter_sampling=500,
+    iter_warmup=500,
     show_console=True,
-    adapt_delta=0.95,
+    adapt_delta=0.8,
+    inits=init,
 )
 
 print(fit.diagnose())
@@ -92,46 +109,38 @@ print(fit.diagnose())
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Shared shape-param draws, each shape (n_draws,)
-a_bump = fit.stan_variable("a_bump")
+a_bump = fit.stan_variable("a_bump")   # (n_draws, n_ppl) now
 b_bump = fit.stan_variable("b_bump")
 a_dip  = fit.stan_variable("a_dip")
 b_dip  = fit.stan_variable("b_dip")
-c      = fit.stan_variable("c")
+c      = fit.stan_variable("c")        # (n_draws, n_ppl)
+beta   = fit.stan_variable("beta")     # (n_draws, n_ppl)
 
-# Per-patient amplitude draws, shape (n_draws, n_ppl)
-beta = fit.stan_variable("beta")
-
-n_draws = beta.shape[0]
-
-# Dense grid to draw smooth curves on (replaces the old x_plot from GQ)
+n_draws, n_ppl = beta.shape
 x_plot = np.linspace(t[0], t[-1], 200)
 
-# Double gamma shape, must match doG.stan exactly:
-#   h(t) = g1(t) - c*g2(t),  g = exp((a-1)log t - b t + a log b - lgamma(a))
+from scipy.special import gammaln
 def double_gamma(tt, a_bump, b_bump, a_dip, b_dip, c):
-    from scipy.special import gammaln
-    tt = np.asarray(tt, dtype=float)
+    # analytic unit-peak normalization, matches doG.stan
+    tt = np.asarray(tt, float)
     h = np.zeros_like(tt)
     pos = tt > 0
     logt = np.log(tt[pos])
-    g1 = np.exp((a_bump - 1) * logt - b_bump * tt[pos] + a_bump * np.log(b_bump) - gammaln(a_bump))  # bump
-    g2 = np.exp((a_dip  - 1) * logt - b_dip  * tt[pos] + a_dip  * np.log(b_dip)  - gammaln(a_dip))   # dip
-    h[pos] = g1 - c * g2
-    h = h / (h.max() - h.min())   # match Stan: peak-to-trough = 1
+    lpk_b = (a_bump-1)*np.log((a_bump-1)/b_bump) - (a_bump-1) + a_bump*np.log(b_bump) - gammaln(a_bump)
+    lpk_d = (a_dip -1)*np.log((a_dip -1)/b_dip ) - (a_dip -1) + a_dip *np.log(b_dip ) - gammaln(a_dip)
+    g_b = np.exp((a_bump-1)*logt - b_bump*tt[pos] + a_bump*np.log(b_bump) - gammaln(a_bump) - lpk_b)
+    g_d = np.exp((a_dip -1)*logt - b_dip *tt[pos] + a_dip *np.log(b_dip ) - gammaln(a_dip ) - lpk_d)
+    h[pos] = g_b - c*g_d
     return h
 
-# Evaluate the shared shape on the grid for every draw: (n_draws, n_grid)
-h_plot = np.empty((n_draws, x_plot.size))
+# Per-patient curves: shape now differs by patient. (n_draws, n_ppl, n_grid)
+y_plot_samples = np.empty((n_draws, n_ppl, x_plot.size))
 for d in range(n_draws):
-    h_plot[d] = double_gamma(x_plot, a_bump[d], b_bump[d], a_dip[d], b_dip[d], c[d])
+    for p in range(n_ppl):
+        h = double_gamma(x_plot, a_bump[d,p], b_bump[d,p], a_dip[d,p], b_dip[d,p], c[d,p])
+        y_plot_samples[d, p] = beta[d, p] * h
 
-# Per-patient fitted curve = beta[draw, p] * h_plot[draw, :]
-# -> y_plot_samples shape (n_draws, n_ppl, n_grid)
-y_plot_samples = beta[:, :, None] * h_plot[:, None, :]
-
-# Posterior summaries per patient
-y_plot_mean = y_plot_samples.mean(axis=0)                 # (n_ppl, n_grid)
+y_plot_mean = y_plot_samples.mean(axis=0)
 y_plot_lo   = np.quantile(y_plot_samples, 0.025, axis=0)
 y_plot_hi   = np.quantile(y_plot_samples, 0.975, axis=0)
 
@@ -161,21 +170,18 @@ for ax, p_idx in zip(axes.flat, patients_to_show):
 plt.tight_layout()
 plt.show()
 
-# %% Population mean curve: mu_beta * h(t)
-mu_beta = fit.stan_variable("mu_beta")   # (n_draws,)
-
-y_plot_mu = mu_beta[:, None] * h_plot    # (n_draws, n_grid)
-
-mean_curve = y_plot_mu.mean(axis=0)
-lo, hi = np.percentile(y_plot_mu, [2.5, 97.5], axis=0)
+# %% Population mean curve: average of per-patient fitted curves
+pop_mean = y_plot_mean.mean(axis=0)                      # mean across patients
+pop_lo   = np.quantile(y_plot_samples.mean(axis=1), 0.025, axis=0)
+pop_hi   = np.quantile(y_plot_samples.mean(axis=1), 0.975, axis=0)
 
 plt.figure(figsize=(9, 4))
-plt.plot(x_plot, mean_curve, color="C0", lw=2, label="population posterior mean")
-plt.fill_between(x_plot, lo, hi, color="C0", alpha=0.25, label="95% CI")
+plt.plot(x_plot, pop_mean, color="C0", lw=2, label="population mean (avg of patients)")
+plt.fill_between(x_plot, pop_lo, pop_hi, color="C0", alpha=0.25, label="95% CI")
 plt.axhline(0, color="k", ls="--", lw=0.8)
 plt.xlabel("time")
 plt.ylabel("BOLD")
-plt.title("Population mean curve  (mu_beta · h(t))")
+plt.title("Population mean curve")
 plt.legend()
 plt.tight_layout()
 plt.show()
