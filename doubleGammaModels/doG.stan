@@ -1,6 +1,8 @@
 functions {
-  // Double gamma HRF shape, h(t) = g1(t) - c*g2(t)
-  // a1,b1: peak gamma; a2,b2: undershoot gamma; c: undershoot weight
+  // Double gamma HRF shape, normalized to peak-to-trough span = 1.
+  // Raw shape is g1 - c*g2 (g1 = bump/added, g2 = dip/subtracted);
+  // we then rescale so max-min = 1 across the supplied timepoints, so the
+  // gamma params control ONLY form and the caller's beta controls amplitude.
   vector double_gamma(vector t, real a1, real b1, real a2, real b2, real c) {
     int N = num_elements(t);
     vector[N] h;
@@ -14,7 +16,9 @@ functions {
         h[n] = g1 - c * g2;
       }
     }
-    return h;
+    // Normalize to unit peak-to-trough so amplitude lives entirely in beta.
+    real span = max(h) - min(h);
+    return h / span;              // span > 0 since h has both + (bump) and - (dip) parts
   }
 }
 data {

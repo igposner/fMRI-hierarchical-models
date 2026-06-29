@@ -80,10 +80,10 @@ fit = model.sample(
     data=stan_data,
     chains=4,
     parallel_chains=4,
-    iter_sampling=500,
-    iter_warmup=500,
+    iter_sampling=1000,
+    iter_warmup=1000,
     show_console=True,
-    adapt_delta=0.9,
+    adapt_delta=0.95,
 )
 
 print(fit.diagnose())
@@ -93,11 +93,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Shared shape-param draws, each shape (n_draws,)
-a1 = fit.stan_variable("a1")
-b1 = fit.stan_variable("b1")
-a2 = fit.stan_variable("a2")
-b2 = fit.stan_variable("b2")
-c  = fit.stan_variable("c")
+a_bump = fit.stan_variable("a_bump")
+b_bump = fit.stan_variable("b_bump")
+a_dip  = fit.stan_variable("a_dip")
+b_dip  = fit.stan_variable("b_dip")
+c      = fit.stan_variable("c")
 
 # Per-patient amplitude draws, shape (n_draws, n_ppl)
 beta = fit.stan_variable("beta")
@@ -109,21 +109,22 @@ x_plot = np.linspace(t[0], t[-1], 200)
 
 # Double gamma shape, must match doG.stan exactly:
 #   h(t) = g1(t) - c*g2(t),  g = exp((a-1)log t - b t + a log b - lgamma(a))
-def double_gamma(tt, a1, b1, a2, b2, c):
+def double_gamma(tt, a_bump, b_bump, a_dip, b_dip, c):
     from scipy.special import gammaln
     tt = np.asarray(tt, dtype=float)
     h = np.zeros_like(tt)
     pos = tt > 0
     logt = np.log(tt[pos])
-    g1 = np.exp((a1 - 1) * logt - b1 * tt[pos] + a1 * np.log(b1) - gammaln(a1))
-    g2 = np.exp((a2 - 1) * logt - b2 * tt[pos] + a2 * np.log(b2) - gammaln(a2))
+    g1 = np.exp((a_bump - 1) * logt - b_bump * tt[pos] + a_bump * np.log(b_bump) - gammaln(a_bump))  # bump
+    g2 = np.exp((a_dip  - 1) * logt - b_dip  * tt[pos] + a_dip  * np.log(b_dip)  - gammaln(a_dip))   # dip
     h[pos] = g1 - c * g2
+    h = h / (h.max() - h.min())   # match Stan: peak-to-trough = 1
     return h
 
 # Evaluate the shared shape on the grid for every draw: (n_draws, n_grid)
 h_plot = np.empty((n_draws, x_plot.size))
 for d in range(n_draws):
-    h_plot[d] = double_gamma(x_plot, a1[d], b1[d], a2[d], b2[d], c[d])
+    h_plot[d] = double_gamma(x_plot, a_bump[d], b_bump[d], a_dip[d], b_dip[d], c[d])
 
 # Per-patient fitted curve = beta[draw, p] * h_plot[draw, :]
 # -> y_plot_samples shape (n_draws, n_ppl, n_grid)
