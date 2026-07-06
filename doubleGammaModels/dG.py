@@ -54,7 +54,7 @@ ax.set_title('Patient 2')
 plt.show() # note that it is completely empty because there is no data for this patient
 
 # %% Compile the Stan model
-model = CmdStanModel(stan_file="doG.stan")
+model = CmdStanModel(stan_file="doG.stan", cpp_options = {'STAN_THREADS': 'TRUE'})
 
 # %% Build stan_data
 n_timepoints, n_patients = data.shape
@@ -63,7 +63,7 @@ y_long = data.flatten(order='F')
 x_long = np.tile(t, n_patients)
 patient_long = np.repeat(np.arange(n_patients) + 1, n_timepoints)
 
-mask = ~np.isnan(y_long)
+mask = ~np.isnan(y_long) & (x_long > 0)
 
 stan_data = {
     "n_obs":    int(mask.sum()),
@@ -76,31 +76,14 @@ stan_data = {
 # %% Fit
 rng = np.random.default_rng()
 
-init = {
-    "mu_tp_dip": 13.0, "mu_tp_bump": 27.0,
-    "sigma_tp_dip": 0.5, "sigma_tp_bump": 0.5,
-    "mu_log_b_dip": -1.5, "mu_log_b_bump": -1.5,
-    "sigma_log_b_dip": 0.1, "sigma_log_b_bump": 0.1,
-    "mu_log_c": 0.0, "sigma_log_c": 0.1,
-    "mu_beta": 0.0, "sigma_beta": 1.0,
-    "tp_dip_raw":   [0.0]*n_patients,
-    "tp_bump_raw":  [0.0]*n_patients,
-    "log_b_dip_raw":[0.0]*n_patients,
-    "log_b_bump_raw":[0.0]*n_patients,
-    "log_c_raw":    [0.0]*n_patients,
-    "beta_raw":     [0.0]*n_patients,
-    "sigma": 1.0,
-}
-
 fit = model.sample(
     data=stan_data,
     chains=4,
     parallel_chains=4,
-    iter_sampling=500,
-    iter_warmup=500,
+    iter_sampling=1000,
+    iter_warmup=1000,
     show_console=True,
     adapt_delta=0.8,
-    inits=init,
 )
 
 print(fit.diagnose())
@@ -137,7 +120,7 @@ def double_gamma(tt, a_bump, b_bump, a_dip, b_dip, c):
 y_plot_samples = np.empty((n_draws, n_ppl, x_plot.size))
 for d in range(n_draws):
     for p in range(n_ppl):
-        h = double_gamma(x_plot, a_bump[d,p], b_bump[d,p], a_dip[d,p], b_dip[d,p], c[d,p])
+        h = double_gamma(x_plot, a_bump[d,p], b_bump[d], a_dip[d,p], b_dip[d], c[d,p])
         y_plot_samples[d, p] = beta[d, p] * h
 
 y_plot_mean = y_plot_samples.mean(axis=0)
@@ -185,3 +168,26 @@ plt.title("Population mean curve")
 plt.legend()
 plt.tight_layout()
 plt.show()
+
+# %% Patient 4 posterior summary
+import numpy as np
+
+p = 3   # python index; stan patient id = 4
+
+print("Patient 4 posterior (per-patient parameters):\n")
+for name in ["beta", "tp_dip", "tp_bump", "b_dip", "b_bump", "c"]:
+    draws = fit.stan_variable(name)[:, p]   # (n_draws,) for patient 4
+    print(f"{name:8s}  mean={draws.mean():8.3f}  sd={draws.std():7.3f}  "
+          f"q2.5={np.quantile(draws,0.025):8.3f}  q97.5={np.quantile(draws,0.975):8.3f}")
+
+
+
+# %% Patient 8 data check
+m = stan_data["patient"] == 8
+x8, y8 = stan_data["x"][m], stan_data["y"][m]
+print(f"Patient 8: {m.sum()} obs, x range {x8.min():.0f}-{x8.max():.0f}")
+plt.scatter(x8, y8, s=10, color="k", alpha=0.5); plt.axhline(0, ls="--", lw=0.8)
+plt.xlim(0,60); plt.show()
+
+
+# %%
