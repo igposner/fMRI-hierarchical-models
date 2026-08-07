@@ -1,4 +1,8 @@
 # environment
+__pycache__/
+*.py[codz]
+*$py.class
+.venv/
 venv/
 lib/
 
