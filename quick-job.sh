@@ -6,7 +6,7 @@ srun \
 --oversubscribe \
 --nodes=1 \
 --ntasks-per-node=1 \
---cpus-per-task=1 \
+--cpus-per-task=5 \
 --mem=8GB \
 --time=8:00:00 \
 --pty bash

@@ -1,3 +1,16 @@
+# environment
 venv/
+lib/
+
+# data
 data/
-lib/doubleGammaModels/doG
+
+# compiled Stan executables
+doubleGammaModels/dG_gender
+doubleGammaModels/dG_gender2
+doubleGammaModels/doG
+*.hpp
+*.o
+
+# fit output
+doubleGammaModels/fits/
