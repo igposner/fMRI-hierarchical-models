@@ -5,7 +5,9 @@ from cmdstanpy import CmdStanModel
 
 rng = np.random.default_rng(0)
 
-# %%
+# %% Import data
+
+# Import the fMRI timeseries into a time x participant (scanning day) matrix
 data = np.genfromtxt(
     '../data/main_a1avg.csv',
     delimiter=',',
@@ -13,33 +15,39 @@ data = np.genfromtxt(
     missing_values='NA'
 )                                    # (420, 65)
 
+# Import the covariates into a participant x predictor matrix
 cov = np.genfromtxt('../data/MainStudy_withsexageanxiety.csv',
                     delimiter=',', skip_header=1)
+# Pull out gender as our only covariate of interest
 gender_all = cov[:, 1]
+# Also pull out the participant IDs for merging covariates and fMRI data together
 ids = cov[:, 0]
 
-# two-day patients have a blank second row; gender is the same person
+# Some of the participants had multiple days of scanning
+# Their covariate data is blank for the additional days
+# Populate the blank gender data for extra scan days
 for i in np.where(np.isnan(gender_all))[0]:
     match = (ids == ids[i]) & ~np.isnan(gender_all)
     assert match.sum() == 1, f"no unique source for patid {ids[i]}"
+    # Populate the blank gender element with the gender for this participant
     gender_all[i] = gender_all[match][0]
 
-assert len(gender_all) == data.shape[1], (len(gender_all), data.shape[1])
-assert not np.isnan(gender_all).any()
+assert len(gender_all) == data.shape[1], f"Number of rows in covariate matrix {len(gender_all)} does not match number of columns in fMRI matrix {data.shape[1]}"
+assert not np.isnan(gender_all).any(), "Some gender data is missing"
 
 # %% full cohort, first 100 timepoints
 data = data[:100]
 print(f"{data.shape[1]} patients, {data.shape[0]} timepoints")
 print(f"{(gender_all > 0).sum()} boys, {(gender_all < 0).sum()} girls")
 
-# %% subset to 10 for fast iteration
+# %% subset to 10 participants for fast iteration
 data = data[:, :10]
 gender_all = gender_all[:10]
 print(f"Using {data.shape[1]} patients, gender: {gender_all}")
 
-# %% mean patient data
+# %% Plot mean timeseries, averaging across participants
 mean_signal = np.nanmean(data, axis=1)
-sem_signal = np.nanstd(data, axis=1) / np.sqrt(np.sum(~np.isnan(data), axis=1))
+sem_signal = np.nanstd(data, axis=1)
 t = np.linspace(0, data.shape[0] - 1, data.shape[0])
 
 figure, ax = plt.subplots(figsize=(10, 4))
@@ -71,11 +79,17 @@ model = CmdStanModel(stan_file="dG_gender2.stan",
 # %% Build stan_data
 n_timepoints, n_patients = data.shape
 
+# Stack fMRI data columns into a single vector
+# Each column is entire timeseries for one participant
 y_long = data.flatten(order='F')
+# Stack corresponding timepoints into a single vector
 x_long = np.tile(t, n_patients)
+# Create a serial index of participants tarting at 1
+# Output: [1, 1, 1, ..., 2, 2, 2, ... N, N, N, ...]
 patient_long = np.repeat(np.arange(n_patients) + 1, n_timepoints)
 
-mask = ~np.isnan(y_long) & (x_long > 0)
+# Exclude censored/missing fMRI data
+mask = ~np.isnan(y_long)
 
 stan_data = {
     "n_obs":    int(mask.sum()),
