@@ -121,7 +121,9 @@ b_dip   = fit.stan_variable("b_dip")     # (D,)  shared
 b_bump  = fit.stan_variable("b_bump")    # (D,)  shared
 c       = fit.stan_variable("c")         # (D, P)
 beta    = fit.stan_variable("beta")      # (D, P)
-sigma   = fit.stan_variable("sigma")     # (D,)
+sigma_early = fit.stan_variable("sigma_early")   # (D,)
+sigma_late  = fit.stan_variable("sigma_late")    # (D,)
+T_SPLIT = 50.0   # must match the hardcoded t_split in dG_gender2.stan
 
 tp_gap      = fit.stan_variable("tp_gap_pop")
 mu_tp_dip   = fit.stan_variable("mu_tp_dip")
@@ -179,7 +181,11 @@ comp_bump = beta[keep][:, :, None] * g_bump
 mu_curves = comp_bump - comp_dip                          # posterior mean curves
 
 # posterior predictive: add observation noise
-y_pred = mu_curves + rng.normal(0.0, 1.0, mu_curves.shape) * sigma[keep][:, None, None]
+# noise is heteroskedastic: sigma_early before T_SPLIT, sigma_late after
+sig_x = np.where(x_plot > T_SPLIT,
+                 sigma_late[keep][:, None],
+                 sigma_early[keep][:, None])          # (D, X)
+y_pred = mu_curves + rng.normal(0.0, 1.0, mu_curves.shape) * sig_x[:, None, :]
 
 y_plot_mean = mu_curves.mean(axis=0)                      # (P, X)
 ppi_lo = np.quantile(y_pred, 0.025, axis=0)
@@ -275,7 +281,7 @@ print(f"PPI coverage: {inside / total:.3f} of observations inside the 95% band")
 # the data being predicted here is the average over n_ppl patients, so the
 # predictive noise shrinks by sqrt(n_ppl)
 mu_pop = mu_curves.mean(axis=1)                              # (D, X)
-y_pop_pred = mu_pop + rng.normal(0.0, 1.0, mu_pop.shape) * (sigma[keep] / np.sqrt(n_ppl))[:, None]
+y_pop_pred = mu_pop + rng.normal(0.0, 1.0, mu_pop.shape) * (sig_x / np.sqrt(n_ppl))
 
 pop_mean = mu_pop.mean(axis=0)
 pop_lo = np.quantile(y_pop_pred, 0.025, axis=0)

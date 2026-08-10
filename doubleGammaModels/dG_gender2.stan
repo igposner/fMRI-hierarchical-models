@@ -13,7 +13,7 @@ parameters {
   //timing of the dip -> (a-1)/b
   real mu_tp_dip; 
   real<lower=0> sigma_tp_dip;
-  vector[n_ppl] tp_dip_raw; //take this out
+  vector<lower=0>[n_ppl] tp_dip;   // centered: sampled directly
 
   //timing of the bump 
   real<lower=0> tp_gap_pop; //modeling with the mean time gap for the whole population parameterized so that it is ordered
@@ -37,13 +37,14 @@ parameters {
   vector[n_ppl] beta_raw; //normalized distance each patient is from  mu_beta
 
   //population noise
-  real<lower=0> sigma;
+  real<lower=1e-6> sigma_early;
+  real<lower=1e-6> sigma_late;
+
 }
 
 transformed parameters {
   //computed time points
   real mu_tp_bump = tp_gap_pop + mu_tp_dip; //this makes it so that the time points are ordered. A prior is placed later on tp_gap so the ordering is strong
-  vector[n_ppl] tp_dip = mu_tp_dip + sigma_tp_dip * tp_dip_raw; //dip
   vector[n_ppl] tp_bump = mu_tp_bump + sigma_tp_bump * tp_bump_raw; //bump
 
   //computed c (scale of gammas)
@@ -57,12 +58,12 @@ model {
   //priors:
 
   //tp dip priors - normalized
-  mu_tp_dip     ~ normal(9, 3); //informed by the mean curve
+  mu_tp_dip     ~ normal(9, 1); //informed by the mean curve
   sigma_tp_dip  ~ normal(0, 1);
-  tp_dip_raw    ~ std_normal();
+  tp_dip        ~ normal(mu_tp_dip, sigma_tp_dip);
 
   //tp bump priors - normalized
-  tp_gap_pop    ~ normal(35, 5); //informed by the mean curve
+  tp_gap_pop    ~ normal(35, 1); //informed by the mean curve
   sigma_tp_bump ~ normal(0, 1);
   tp_bump_raw   ~ std_normal();
 
@@ -76,13 +77,14 @@ model {
   log_c_raw     ~ std_normal();
 
   //beta priors, this is what the predictor is attatched - normalized
-  mu_beta       ~ normal(0, 10); //
-  beta_gender   ~ normal(0, 5);
+  mu_beta       ~ normal(0, 3); //
+  beta_gender   ~ normal(0, 3);
   sigma_beta    ~ normal(0, 5);
   beta_raw      ~ std_normal();
 
   //population noise
-  sigma         ~ normal(0, 5);
+  sigma_early   ~ normal(0, 3);
+  sigma_late    ~ normal(0, 8);
 
   //making a vector of length n_obs that has the tps
   vector[n_obs] td = tp_dip[patient];
@@ -96,8 +98,13 @@ model {
   vector[n_obs] lg_dip  = (td * b_dip)  .* (log(x) - log(td)) - b_dip  * (x - td);
   vector[n_obs] lg_bump = (tb * b_bump) .* (log(x) - log(tb)) - b_bump * (x - tb);
   vector[n_obs] mu = beta[patient] .* (c[patient] .* exp(lg_bump) - exp(lg_dip));
+
   //likelyhood
-  y ~ normal(mu, sigma);
+  // HARDCODED breakpoint: sits past the bump (mu_tp_bump ~ 50).
+  real t_split = 50.0;
+  vector[n_obs] sig;
+  for (i in 1:n_obs) sig[i] = x[i] > t_split ? sigma_late : sigma_early;
+  y ~ normal(mu, sig);
 }
 
 generated quantities {
