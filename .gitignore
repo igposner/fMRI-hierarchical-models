@@ -10,11 +10,10 @@ lib/
 data/
 
 # compiled Stan executables
-doubleGammaModels/dG_gender
-doubleGammaModels/dG_gender2
-doubleGammaModels/doG
-*.hpp
-*.o
+doubleGammaModels/*
+!doubleGammaModels/*.*
+doubleGammaModels/*.hpp
+doubleGammaModels/*.o
 
 # fit output
 doubleGammaModels/fits/
