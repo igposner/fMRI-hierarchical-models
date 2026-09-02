@@ -29,7 +29,6 @@ parameters {
 }
 
 model {
-  //priors:
 
   //tp dip priors
   mu_tp_dip     ~ normal(9, 3);   //informed by the mean curve

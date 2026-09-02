@@ -1,0 +1,6 @@
+fits/
+*.hpp
+4scanSingleGamma
+4scanSingleGammaPerPatientSigma
+4ssgWidth
+singleGamma2
