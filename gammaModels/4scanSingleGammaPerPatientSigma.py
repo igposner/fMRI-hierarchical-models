@@ -176,15 +176,15 @@ fit = model.sample(
 print(fit.diagnose())
 
 # %% ===== CELL 6: EXTRACT DRAWS + RECONSTRUCT CURVES =====
-# Silent; builds objects only. Timing is now per PATIENT and width per SCAN,
-# so every scan curve has its own (loc, c) pair.
+# Silent; builds objects only. Timing has no patient level: population -> scan.
+# Width and depth still go population -> patient -> scan.
 
-# timing: population -> patient
-mu_tp_log = fit.stan_variable("mu_tp_log")            # (D,)
-sigma_tp  = fit.stan_variable("sigma_tp")             # (D,)  between patients
-tp_log    = fit.stan_variable("tp_log")               # (D, P)
-tp_dip_p  = fit.stan_variable("tp_dip_p")             # (D, P) TR scale
-tp_median = fit.stan_variable("tp_median")            # (D,)
+# timing: population -> scan
+mu_tp_log     = fit.stan_variable("mu_tp_log")            # (D,)
+sigma_tp_scan = fit.stan_variable("sigma_tp_scan")        # (D,)   scan-to-scan
+tp_log_s      = fit.stan_variable("tp_log_s")             # (D, S)
+tp_dip_s      = fit.stan_variable("tp_dip_s")             # (D, S) TR scale
+tp_median     = fit.stan_variable("tp_median")            # (D,)
 
 # width: population -> patient -> scan
 mu_width_log     = fit.stan_variable("mu_width_log")      # (D,)
@@ -228,16 +228,16 @@ n_keep = min(200, beta_s.shape[0])   # (200, S, 200) float64 ~ 80 MB per array
 keep   = rng.choice(beta_s.shape[0], n_keep, replace=False)
 x_plot = np.linspace(0.5, t[-1], 200)          # start > 0; log(0) is -inf
 
-# scan-level curves: what the likelihood predicts. Timing comes from the
-# owning patient, width from the scan itself.
-tp_scan   = tp_dip_p[keep][:, scan_patient - 1]             # (D, S)
+# scan-level curves: what the likelihood predicts. Timing, width and depth all
+# come from the scan itself.
+tp_scan   = tp_dip_s[keep]                                  # (D, S)
 mu_curves = -beta_s[keep][:, :, None] * unit_gamma(x_plot, tp_scan, c_dip_s[keep])
 
-# patient-level curves: scan effects averaged out. Both timing and width taken
-# at the PATIENT level, so these are not the mean of the scan curves.
+# patient-level curves: scan effects averaged out. Depth and width are the
+# patient's own; timing is POPULATION, since the patient timing level is gone.
 beta_p      = np.exp(beta_log[keep])                        # (D, P)
 width_p     = np.exp(width_log[keep])                       # (D, P)
-tp_p        = tp_dip_p[keep]                                # (D, P)
+tp_p        = np.repeat(tp_median[keep][:, None], beta_p.shape[1], axis=1)
 c_p         = gamma_c(tp_p, width_p)
 mu_curves_p = -beta_p[:, :, None] * unit_gamma(x_plot, tp_p, c_p)
 
@@ -250,22 +250,25 @@ ppi_lo = np.quantile(y_pred, 0.025, axis=0)
 ppi_hi = np.quantile(y_pred, 0.975, axis=0)
 
 # %% ===== CELL 7: DIAGNOSTICS REPORT =====
-# All text. Sections: parameter sanity -> timing identifiability -> per-patient
-# noise -> variance decomposition -> multimodality -> residual autocorrelation
-# -> gender -> PPI coverage.
+# All text. Sections: parameter sanity -> identifiability -> scan-level timing
+# -> per-patient noise -> variance decomposition -> chain agreement ->
+# residual autocorrelation -> gender -> PPI coverage.
 
 sig_p_mean   = sigma_p.mean(axis=0)
 width_s_mean = width_dip_s.mean(axis=0)
-tp_p_mean    = tp_dip_p.mean(axis=0)
+tp_p_mean    = tp_median.mean()          # scalar: timing has no patient level
+tp_s_mean    = tp_dip_s.mean(axis=0)
 boys, girls  = gender_all > 0, gender_all < 0
 
 print("=== parameters ===")
 print(f"tp_median     mean={tp_median.mean():7.3f}  [{np.quantile(tp_median,.025):6.3f},"
       f" {np.quantile(tp_median,.975):6.3f}]   (pooled fit gave 10.28)")
-print(f"tp_dip_p      min={tp_p_mean.min():7.3f}  median={np.median(tp_p_mean):7.3f}"
-      f"  max={tp_p_mean.max():7.3f}   (empirical trough IQR [10.0, 19.8])")
+print(f"tp_dip_s      min={tp_s_mean.min():7.3f}  median={np.median(tp_s_mean):7.3f}"
+      f"  max={tp_s_mean.max():7.3f}   (bounded 4-28)")
+print(f"  at floor (<4.2) {np.sum(tp_s_mean < 4.2):3d} scans"
+      f"   at ceiling (>27.5) {np.sum(tp_s_mean > 27.5):3d} scans  of {n_scans}")
 print(f"width_median  mean={width_median.mean():7.3f}  [{np.quantile(width_median,.025):6.3f},"
-      f" {np.quantile(width_median,.975):6.3f}]   (exp of mu_width_log ~ normal(1.6, 0.3))")
+      f" {np.quantile(width_median,.975):6.3f}]")
 print(f"width_dip_s   min={width_s_mean.min():7.3f}  median={np.median(width_s_mean):7.3f}"
       f"  max={width_s_mean.max():7.3f}")
 print(f"c_dip_s       min={c_dip_s.mean(0).min():9.2f}  mean={c_dip_s.mean():9.2f}"
@@ -273,16 +276,32 @@ print(f"c_dip_s       min={c_dip_s.mean(0).min():9.2f}  mean={c_dip_s.mean():9.2
 print(f"beta_s        min={beta_s.min():7.3f}  mean={beta_s.mean():7.3f}  max={beta_s.max():7.3f}")
 print(f"pop depth (exp mu_beta_log) = {np.exp(mu_beta_log).mean():.2f} BOLD")
 
-print("\n=== identifiability of the patient levels ===")
-print("per-patient posterior SD vs the population SD it was drawn from.")
+print("\n=== identifiability ===")
+print("per-parameter posterior SD vs the population SD it was drawn from.")
 print("ratio near 1 = data adds nothing, parameter is sampling its prior.")
-for lab, pat, pop in [("tp_log   ", tp_log,    sigma_tp),
-                      ("width_log", width_log, sigma_width),
-                      ("beta_log ", beta_log,  sigma_beta)]:
+for lab, pat, pop in [("tp_log_s  (scan)   ", tp_log_s,   sigma_tp_scan),
+                      ("width_log (patient)", width_log,  sigma_width),
+                      ("beta_log  (patient)", beta_log,   sigma_beta)]:
     post_sd = np.median(pat.std(axis=0))
     print(f"{lab}  post sd {post_sd:.3f}  vs sigma {pop.mean():.3f}"
           f"  ratio {post_sd / pop.mean():.2f}"
-          f"   | fitted spread across patients {pat.mean(axis=0).std():.3f}")
+          f"   | fitted spread {pat.mean(axis=0).std():.3f}")
+print("NB the patient timing level was REMOVED: it had ratio 1.27 and a fitted")
+print("   spread of 0.017 across 65 patients, and its funnel drove 18.5% divergences.")
+
+print("\n=== scan-level timing ===")
+print(f"sigma_tp_scan  mean={sigma_tp_scan.mean():.4f}  "
+      f"[{np.quantile(sigma_tp_scan,.025):.4f}, {np.quantile(sigma_tp_scan,.975):.4f}]"
+      f"   (prior normal(0, 0.1))")
+print(f"  P(sigma_tp_scan > 0.20) = {(sigma_tp_scan > 0.20).mean():.3f}")
+if np.quantile(sigma_tp_scan, 0.9) > 0.20:
+    print("  WARNING: pressing against its prior. Drift is believed to be NOISE,")
+    print("           not real timing variation -- do not widen. The fix is a")
+    print("           temporal error model, not a looser prior.")
+print(f"  implied scan drift at tp=11: +-{11*(np.exp(sigma_tp_scan.mean())-1):.1f} TR at 1sd")
+print(f"sigma_beta_scan {sigma_beta_scan.mean():.3f}   (was 1.19 WITHOUT scan timing)")
+print("  the hypothesis: depth was compensating for timing misalignment.")
+print("  a drop here is the signal that freeing scan timing worked.")
 
 print("\n=== per-patient noise ===")
 print(f"sigma_median   mean={sigma_median.mean():6.3f}  [{np.quantile(sigma_median,.025):6.3f},"
@@ -291,34 +310,34 @@ print(f"sigma_log_sigma mean={sigma_log_sigma.mean():6.3f} -> "
       f"{np.exp(sigma_log_sigma.mean()):.2f}x noise ratio at 1sd")
 print(f"sigma_p        min={sig_p_mean.min():6.3f}  median={np.median(sig_p_mean):6.3f}"
       f"  max={sig_p_mean.max():6.3f}  ratio={sig_p_mean.max()/sig_p_mean.min():.2f}x")
-if sigma_log_sigma.mean() < 0.05:
-    print("  NB near zero: per-patient sigma is not earning its parameters")
 order = np.argsort(sig_p_mean)
 print(f"  quietest: {[f'p{p+1}={sig_p_mean[p]:.2f}' for p in order[:5]]}")
 print(f"  noisiest: {[f'p{p+1}={sig_p_mean[p]:.2f}' for p in order[-5:][::-1]]}")
-print("  NB tp_dip is no longer pooled, so timing misfit should land in sigma_p")
-print("     less than before. A drop here is the signal that the change worked.")
 
 print("\n=== variance decomposition ===")
 print("between/within split a fixed total, so they trade off. Strong negative")
 print("correlation = ridge (data can't separate them); two clusters = bimodal.")
-for lab, betw, wthn in [("beta ", sigma_beta, sigma_beta_scan),
+print("timing is omitted: no between-patient level to decompose.")
+for lab, betw, wthn in [("beta ", sigma_beta,  sigma_beta_scan),
                         ("width", sigma_width, sigma_width_scan)]:
     r    = np.corrcoef(betw, wthn)[0, 1]
     frac = wthn.mean() / (wthn.mean() + betw.mean())
     print(f"{lab}  between={betw.mean():.4f}  within={wthn.mean():.4f}"
           f"  within/total={frac:.2f}  corr={r:+.3f}"
           f"  P(within<0.01)={(wthn < 0.01).mean():.3f}")
-print(f"tp     between={sigma_tp.mean():.4f}   (no scan level on timing yet)")
-print(f"  prior was normal(0, 0.2); P(sigma_tp > 0.3) = {(sigma_tp > 0.3).mean():.3f}")
-if np.quantile(sigma_tp, 0.9) > 0.35:
-    print("  WARNING: sigma_tp pressing against its prior -- widen it and refit")
 
 print("\n=== chain agreement on population means ===")
 d = fit.draws_pd()
-for v in ["mu_tp_log", "sigma_tp", "mu_width_log", "mu_beta_log", "mu_log_sigma"]:
+for v in ["mu_tp_log", "sigma_tp_scan", "mu_width_log",
+          "sigma_width", "mu_beta_log", "sigma_beta", "mu_log_sigma"]:
     cm = d.groupby("chain__")[v].mean().values
-    print(f"{v:14s} {np.round(cm, 3)}   within-chain sd {d[v].std():.3f}")
+    print(f"{v:15s} {np.round(cm, 4)}   within-chain sd {d[v].std():.4f}")
+
+div = d["divergent__"].values.astype(bool)
+if div.sum():
+    print(f"\ndivergences by chain: {d.groupby('chain__')['divergent__'].sum().values}")
+    for v in ["sigma_tp_scan", "sigma_width", "sigma_beta", "sigma_beta_scan"]:
+        print(f"  {v:16s} divergent {d[v][div].mean():.4f}  vs clean {d[v][~div].mean():.4f}")
 
 print("\n=== residual autocorrelation ===")
 print("the likelihood assumes independent residuals; BOLD noise is not.")
@@ -346,10 +365,10 @@ print(f"mem_gender   mean={mem_gender.mean():7.3f}  "
 print(f"compare against sigma_beta={sigma_beta.mean():.3f}, not against zero")
 print(f"{boys.sum()} boys / {girls.sum()} girls; scans "
       f"{(gender_scan > 0).sum()} / {(gender_scan < 0).sum()}")
-print(f"implied depths: boy {np.exp(mu_beta_log + .5*beta_gender).mean():.3f}, "
-      f"girl {np.exp(mu_beta_log - .5*beta_gender).mean():.3f}")
 print("NB mu_beta_log is the MIDPOINT of the groups, not the cohort average --")
 print("   with unequal group sizes these differ. (open question for Kay)")
+print("NB mem_gender is a difference of MEDIANS. The difference of means is")
+print("   larger by exp(sigma_beta_scan^2/2). (open question for Kay)")
 print("NB intervals here do NOT account for the residual autocorrelation above,")
 print("   so they are substantially too narrow.")
 
@@ -366,12 +385,11 @@ cov_frac = cov_p / np.maximum(tot_p, 1)
 quiet = sig_p_mean < np.median(sig_p_mean)
 print(f"overall {cov_p.sum()/tot_p.sum():.3f} inside the 95% band  "
       f"(quiet half {cov_frac[quiet].mean():.3f}, noisy half {cov_frac[~quiet].mean():.3f})")
-print("  a large gap means shared-sigma was mis-calibrating one group")
 
 # %% ===== CELL 8: FIGURES =====
 # 1 observed mean  2 noise  3 ridge checks  4 gender posteriors
 # 5 dip by gender  6 example patients  7 population curve  8 residual
-# 9 fitted vs empirical timing (new -- the point of the tp change)
+# 9 fitted vs empirical timing  10 patient mean vs patient curve
 
 mean_signal = np.nanmean(Y, axis=1)
 sd_signal   = np.nanstd(Y, axis=1)
@@ -381,6 +399,7 @@ sigma_pop  = sigma_scan.mean(axis=1) / np.sqrt(n_scans)
 y_pop_pred = mu_pop + rng.normal(0.0, 1.0, mu_pop.shape) * sigma_pop[:, None]
 pop_mean   = mu_pop.mean(axis=0)
 
+tp_pop_mean = tp_median.mean()       # timing is population-level now
 PATIENTS_TO_SHOW = [1, 3, 6, 9]      # stan patient ids
 
 # --- 1. observed mean signal ---
@@ -402,7 +421,8 @@ axes[1].hist(sigma_log_sigma, bins=60, color="C0", alpha=.8)
 axes[1].set(xlabel="sigma_log_sigma", ylabel="posterior draws")
 plt.tight_layout(); plt.show()
 
-# --- 3. ridge checks: between vs within, plus the new sigma_tp posterior ---
+# --- 3. between vs within. Timing has no between level now, so it shows
+#        sigma_tp_scan against its 0.1 prior instead.
 fig, axes = plt.subplots(1, 3, figsize=(14, 4), dpi=110)
 axes[0].scatter(sigma_beta, sigma_beta_scan, s=2, alpha=.15, color="C0")
 axes[0].set(xlabel="sigma_beta (between)", ylabel="sigma_beta_scan (within)",
@@ -410,9 +430,11 @@ axes[0].set(xlabel="sigma_beta (between)", ylabel="sigma_beta_scan (within)",
 axes[1].scatter(sigma_width, sigma_width_scan, s=2, alpha=.15, color="C1")
 axes[1].set(xlabel="sigma_width (between)", ylabel="sigma_width_scan (within)",
             title="width")
-axes[2].hist(sigma_tp, bins=60, color="C2", alpha=.8)
-axes[2].set(xlabel="sigma_tp (between patients, log scale)", ylabel="draws",
-            title="timing  (prior normal(0, 0.2))")
+axes[2].hist(sigma_tp_scan, bins=60, color="C2", alpha=.8)
+axes[2].axvline(0.1, color="k", ls="--", lw=1, label="prior scale")
+axes[2].set(xlabel="sigma_tp_scan", ylabel="posterior draws",
+            title="timing  (scan only; prior normal(0, 0.1))")
+axes[2].legend(fontsize=8)
 plt.tight_layout(); plt.show()
 
 # --- 4. gender posteriors ---
@@ -424,7 +446,6 @@ axes[1].set(xlabel="mem_gender (boy - girl depth, BOLD)")
 plt.tight_layout(); plt.show()
 
 # --- 5. dip by gender, patient level (no observation noise) ---
-# Curves now differ in depth, width AND timing, since all three vary by patient.
 plt.figure(figsize=(8, 4), dpi=120)
 for sel, lab, col in [(boys, "boys", "C0"), (girls, "girls", "C3")]:
     if sel.sum() == 0:
@@ -434,35 +455,34 @@ for sel, lab, col in [(boys, "boys", "C0"), (girls, "girls", "C3")]:
     plt.fill_between(x_plot, np.quantile(dips, .025, axis=0),
                      np.quantile(dips, .975, axis=0), color=col, alpha=.2)
 plt.axhline(0, color="k", ls="--", lw=.8)
-plt.axvline(tp_median.mean(), color="grey", ls=":", lw=.8)
+plt.axvline(tp_pop_mean, color="grey", ls=":", lw=.8)
 plt.xlabel("time (TR)"); plt.ylabel("BOLD"); plt.title("dip curve by gender (patient level)")
 plt.legend(fontsize=8); plt.tight_layout(); plt.show()
 
 # --- 6. example patients, all scans overlaid ---
-# Dashed black = patient level. Scans of one patient now share a peak time
-# (timing is patient-level) and differ in depth and width.
+# Dashed black = patient level, which now uses POPULATION timing with this
+# patient's depth and width. Dotted lines mark each scan's own tp.
 fig, axes = plt.subplots(2, 2, figsize=(12, 8), dpi=150)
 for ax, stan_p in zip(axes.flat, PATIENTS_TO_SHOW):
     for k, s in enumerate(np.where(scan_patient == stan_p)[0]):
         m = stan_data["scan"] == s + 1
         ax.scatter(stan_data["x"][m], stan_data["y"][m], s=6, color=f"C{k}", alpha=.35)
         ax.plot(x_plot, y_plot_mean[s], color=f"C{k}", lw=1.2,
-                label=f"run {scan_run[s]} (depth={beta_s[:, s].mean():.2f}, "
-                      f"w={width_s_mean[s]:.2f})")
+                label=f"run {scan_run[s]} (tp={tp_s_mean[s]:.1f}, "
+                      f"d={beta_s[:, s].mean():.2f}, w={width_s_mean[s]:.2f})")
+        ax.axvline(tp_s_mean[s], color=f"C{k}", ls=":", lw=.7, alpha=.6)
     ax.plot(x_plot, mu_curves_p[:, stan_p - 1, :].mean(axis=0),
-            color="k", ls="--", lw=2, label="patient level")
+            color="k", ls="--", lw=2, label="patient level (pop timing)")
     ax.axhline(0, color="k", ls="--", lw=.8)
-    ax.axvline(tp_p_mean[stan_p - 1], color="grey", ls=":", lw=.8)
     ax.set(xlabel="time", ylabel="BOLD",
            title=f"Patient {stan_p} ({(scan_patient == stan_p).sum()} scans, "
-                 f"tp={tp_p_mean[stan_p-1]:.1f}, "
                  f"depth={np.exp(beta_log[:, stan_p-1]).mean():.2f}, "
                  f"w={np.exp(width_log[:, stan_p-1]).mean():.2f}, "
                  f"sigma={sig_p_mean[stan_p-1]:.2f})")
     ax.legend(fontsize=7)
 plt.tight_layout(); plt.show()
 
-# --- 7. population mean curve (averaged over scans, matching mean_signal) ---
+# --- 7. population mean curve ---
 plt.figure(figsize=(9, 4))
 plt.plot(x_plot, pop_mean, color="C0", lw=2, label="population mean (avg of scans)")
 plt.fill_between(x_plot, np.quantile(y_pop_pred, .025, axis=0),
@@ -474,67 +494,69 @@ plt.legend(); plt.tight_layout(); plt.show()
 
 # --- 8. residual ---
 # A single gamma decays monotonically and cannot produce the positive overshoot
-# around TR 30-55; that residual is structural, not a bug, and sigma_p absorbs
-# it. With tp now patient-level, timing misfit should contribute less here.
+# around TR 25-60; that residual is structural, and sigma_p absorbs it.
 plt.figure(figsize=(9, 3))
 plt.plot(t, mean_signal - np.interp(t, x_plot, pop_mean), color="C3", lw=1)
 plt.axhline(0, color="k", ls="--", lw=.8)
-plt.axvspan(30, 55, color="grey", alpha=.15, label="unmodelled overshoot")
+plt.axvspan(25, 60, color="grey", alpha=.15, label="unmodelled overshoot")
 plt.xlabel("time (TR)"); plt.ylabel("observed - fitted")
 plt.legend(fontsize=8); plt.tight_layout(); plt.show()
 
-# --- 9. fitted timing vs empirical trough (the point of the tp change) ---
+# --- 9. fitted vs empirical timing, now at the SCAN level ---
 # Empirical trough restricted to TR 4-30: over the full window the global
-# minimum finds slow baseline wander rather than the response, which is why the
-# unrestricted version gave a median of 18 with an IQR out to 42.
+# minimum finds slow baseline wander rather than the response.
 from scipy.ndimage import uniform_filter1d
 
-win = (stan_data["x"] >= 4) & (stan_data["x"] <= 30)
 trough_t = np.full(n_scans, np.nan)
 for s in range(n_scans):
-    m = (stan_data["scan"] == s + 1) & win
+    m = (stan_data["scan"] == s + 1) & (stan_data["x"] >= 4) & (stan_data["x"] <= 30)
     xs, ys = stan_data["x"][m], stan_data["y"][m]
-    if xs.size < 15:
-        continue
-    trough_t[s] = xs[np.argmin(uniform_filter1d(ys, size=5, mode="nearest"))]
+    if xs.size >= 15:
+        trough_t[s] = xs[np.argmin(uniform_filter1d(ys, size=5, mode="nearest"))]
 
-trough_p = np.array([np.nanmean(trough_t[scan_patient == p + 1])
-                     for p in range(n_patients)])
-ok = np.isfinite(trough_p)
+ok = np.isfinite(trough_t) & (trough_t > 5) & (trough_t < 29)   # drop window-edge hits
 
 fig, axes = plt.subplots(1, 2, figsize=(11, 4), dpi=110)
-axes[0].hist(trough_t[np.isfinite(trough_t)], bins=25, color="grey", alpha=.6,
-             label="empirical, per scan")
-axes[0].hist(tp_p_mean, bins=25, color="C2", alpha=.7, label="fitted, per patient")
-axes[0].axvline(tp_median.mean(), color="k", ls="--", lw=1, label="population")
+axes[0].hist(trough_t[ok], bins=20, color="grey", alpha=.6, label="empirical, per scan")
+axes[0].hist(tp_s_mean, bins=25, color="C2", alpha=.7, label="fitted, per scan")
+axes[0].axvline(tp_pop_mean, color="k", ls="--", lw=1, label="population")
 axes[0].set(xlabel="dip time (TR)", ylabel="count"); axes[0].legend(fontsize=8)
 
-axes[1].scatter(trough_p[ok], tp_p_mean[ok], s=14, alpha=.7, color="C2")
-lim = [min(trough_p[ok].min(), tp_p_mean.min()) - 1,
-       max(trough_p[ok].max(), tp_p_mean.max()) + 1]
+axes[1].scatter(trough_t[ok], tp_s_mean[ok], s=12, alpha=.5, color="C2")
+lim = [min(trough_t[ok].min(), tp_s_mean.min()) - 1,
+       max(trough_t[ok].max(), tp_s_mean.max()) + 1]
 axes[1].plot(lim, lim, color="k", ls="--", lw=.8)
-axes[1].set(xlim=lim, ylim=lim, xlabel="empirical trough (mean of patient's scans)",
-            ylabel="fitted tp_dip_p",
-            title=f"corr {np.corrcoef(trough_p[ok], tp_p_mean[ok])[0,1]:+.2f}")
+axes[1].set(xlim=lim, ylim=lim, xlabel="empirical trough (per scan)",
+            ylabel="fitted tp_dip_s",
+            title=f"corr {np.corrcoef(trough_t[ok], tp_s_mean[ok])[0,1]:+.2f}  "
+                  f"(n={ok.sum()} of {n_scans})")
 plt.tight_layout(); plt.show()
 
 # --- 10. patient mean vs patient-level curve ---
-# The 4 scans averaged, against the single patient-level fit. Cleaner read than
-# figure 6: averaging the scans cuts noise by ~2, so what is left is whether the
-# patient curve sits where the patient's actual dip sits.
+# NB the dots are an arithmetic MEAN of scans; the curve is built from
+# exp(beta_log), the patient MEDIAN. With sigma_beta_scan large the mean sits
+# exp(s^2/2) above the median, so the curve is expected to look shallow.
+# The red dashed line is the implied mean depth, which is the fair comparison.
+# Both curves use population timing, so scan-level timing spread is a second
+# reason the averaged dots look shallower than any single scan.
 fig, axes = plt.subplots(2, 2, figsize=(11, 7), dpi=130)
+infl = np.exp(0.5 * sigma_beta_scan[keep] ** 2)
 for ax, stan_p in zip(axes.flat, PATIENTS_TO_SHOW):
     s_idx = np.where(scan_patient == stan_p)[0]
-    y_bar = np.nanmean(Y[:, s_idx], axis=1)          # (T,) mean across that patient's scans
+    y_bar = np.nanmean(Y[:, s_idx], axis=1)
 
     ax.scatter(t, y_bar, s=14, color="C0", alpha=.6, label=f"mean of {len(s_idx)} scans")
     ax.plot(x_plot, mu_curves_p[:, stan_p - 1, :].mean(axis=0),
-            color="k", lw=2, label="patient-level fit")
+            color="k", lw=2, label="patient fit (median)")
+
+    mu_mean = mu_curves_p[:, stan_p - 1, :] * infl[:, None]
+    ax.plot(x_plot, mu_mean.mean(axis=0), color="C3", lw=1.5, ls="--",
+            label="implied mean depth")
+
     ax.axhline(0, color="k", ls="--", lw=.8)
-    ax.axvline(tp_p_mean[stan_p - 1], color="grey", ls=":", lw=.8)
+    ax.axvline(tp_pop_mean, color="grey", ls=":", lw=.8)
     ax.set(xlabel="time (TR)", ylabel="BOLD",
-           title=f"Patient {stan_p}  (tp={tp_p_mean[stan_p-1]:.1f}, "
-                 f"depth={np.exp(beta_log[:, stan_p-1]).mean():.2f}, "
+           title=f"Patient {stan_p}  (depth={np.exp(beta_log[:, stan_p-1]).mean():.2f}, "
                  f"w={np.exp(width_log[:, stan_p-1]).mean():.2f})")
     ax.legend(fontsize=8)
 plt.tight_layout(); plt.show()

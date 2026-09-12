@@ -42,7 +42,6 @@ functions {
   }
 
   // Vectorized version: elementwise gamma_c for per-scan (loc, sigma) pairs.
-  // loc and sigma must be the same length.
   vector gamma_c(vector loc, vector sigma) {
     vector[num_elements(loc)] loc2 = square(loc);
     vector[num_elements(sigma)] sigma2 = square(sigma);
@@ -50,20 +49,13 @@ functions {
   }
 }
 
-//single-gamma dip only; tests the impact that gender has on beta (the amplitude)
-//scans are modeled individually (not averaged), with scan-level random effects
-//  on amplitude AND width nested within patient.
-//tp_dip is now PARTIALLY POOLED at the patient level (non-centered, log scale).
-//  Previously a single pooled scalar at 10.28 TR, but the empirical per-scan
-//  trough in TR 4-30 has median 13.0 and IQR [10.0, 19.8] -- one number cannot
-//  cover that spread. No scan level on timing yet; that is a separate question.
-//width_dip has a 3-level structure: population -> patient (centered) -> scan
-//  (non-centered), on the log scale.
-//beta is NON-CENTERED at BOTH the patient and scan levels. The previous
-//  centered patient level funnelled: divergences concentrated at small
-//  sigma_beta (0.023 divergent vs 0.145 clean), and one chain slid toward
-//  sigma_beta -> 0.
-//residual noise is PER PATIENT: sigma_p[p], hierarchical on the log scale.
+//single-gamma dip; tests the effect of gender on beta (the amplitude).
+//scans modeled individually, with scan-level random effects on timing,
+//  amplitude and width nested within patient.
+//tp:    population -> patient (centered, bounded 4-25 TR) -> scan (non-centered)
+//width: population -> patient (non-centered) -> scan (non-centered)
+//beta:  population -> patient (non-centered) -> scan (non-centered)
+//noise: per patient, hierarchical on the log scale.
 data {
   int<lower=0> n_obs;
   int<lower=1> n_ppl;
@@ -85,128 +77,96 @@ transformed data {
 }
 
 parameters {
-  //timing of the dip -> (a-1)/b, in TRs. Hierarchical: population mean ->
-  //  patient offset (non-centered), log scale. Log scale matches beta and
-  //  width, keeps tp > 0 without a hard boundary, and makes the patient
-  //  spread multiplicative.
-  real mu_tp_log;                   // population mean log timing
-  real<lower=0> sigma_tp;           // patient-to-patient SD, log scale
-  vector<lower=log(4), upper=log(25)>[n_ppl] tp_log;
+  //timing, log scale. Patient level sampled directly inside a hard bound;
+  //  scan level non-centered on top of it.
+  real mu_tp_log;
+  real<lower=0> sigma_tp_scan;                           // within patient
+  vector<lower=log(4), upper=log(28)>[n_scans] tp_log_s; // scan level, bounded
 
-  //width of dip -> SD of the curve in TRs. Hierarchical: population mean
-  //  -> patient offset (centered) -> scan offset (non-centered), log scale.
-  real mu_width_log;                // population mean log width
-  real<lower=0> sigma_width;        // patient-to-patient SD, log scale
-  vector[n_ppl] z_width_p;          // patient level, non-centered: standardized offsets
-  real<lower=0> sigma_width_scan;   // scan-to-scan SD within a patient, log scale
-  vector[n_scans] z_width;          // scan level, non-centered: standardized offsets
+  //width -> SD of the curve in TRs, log scale.
+  real mu_width_log;
+  real<lower=0> sigma_width;        // between patients
+  vector[n_ppl] z_width_p;          // patient level, non-centered
+  real<lower=0> sigma_width_scan;   // within patient
+  vector[n_scans] z_width;          // scan level, non-centered
 
-  //amplitude, log scale
-  real mu_beta_log;     //mean amplitude
-  real beta_gender;                // boy-girl difference in amplitude (gender coded +-0.5)
-  real<lower=0> sigma_beta;        //sd in amplitude between patients
-  vector[n_ppl] z_beta_p;          // patient level, non-centered: standardized offsets
-  real<lower=0> sigma_beta_scan;   // scan-to-scan SD within a patient, shared across patients
-  vector[n_scans] z_beta;          // scan level, non-centered: standardized offsets
+  //amplitude, log scale.
+  real mu_beta_log;
+  real beta_gender;                 // boy-girl difference (gender coded +-0.5)
+  real<lower=0> sigma_beta;         // between patients
+  vector[n_ppl] z_beta_p;           // patient level, non-centered
+  real<lower=0> sigma_beta_scan;    // within patient
+  vector[n_scans] z_beta;           // scan level, non-centered
 
-  //per-patient residual noise, hierarchical on the log scale.
-  //  log scale keeps sigma_p > 0 without a hard boundary, and makes the spread
-  //  multiplicative (a quiet patient is "half as noisy", not "0.9 units less").
-  real mu_log_sigma;                // population median log noise
-  real<lower=0> sigma_log_sigma;    // spread of log noise across patients
-  vector[n_ppl] z_sigma;            // non-centered: standardized offsets
+  //per-patient residual noise, log scale.
+  real mu_log_sigma;
+  real<lower=0> sigma_log_sigma;
+  vector[n_ppl] z_sigma;
 }
 
 transformed parameters {
-  //patient-level dip timing, non-centered, then back to the natural (TR) scale.
-  vector<lower=0>[n_ppl] tp_dip_p = exp(tp_log);
+  //scan-level timing: patient term + scan offset. This is what the model uses.
+  vector<lower=0>[n_scans] tp_dip_s = exp(tp_log_s);
 
   vector[n_ppl] width_log = mu_width_log + sigma_width * z_width_p;
+  vector[n_ppl] beta_log  = mu_beta_log + beta_gender * gender + sigma_beta * z_beta_p;
 
-  //patient-level amplitude, built non-centered from the population mean, the
-  //  gender regression, and the standardized offsets.
-  vector[n_ppl] beta_log = mu_beta_log + beta_gender * gender + sigma_beta * z_beta_p;
-
-  //expand patient values out to one per scan, then offset each scan.
-  //  scans from the same patient share the patient term and differ only
-  //  by sigma_beta_scan * z_beta
+  //expand patient values to one per scan, then offset each scan.
   vector[n_scans] beta_log_s = beta_log[scan_patient] + sigma_beta_scan * z_beta;
   vector[n_scans] beta_s     = exp(beta_log_s);
 
-  //same expansion for width: patient term + scan-level non-centered offset,
-  //  then back to the natural (TR) scale.
   vector[n_scans] width_log_s = width_log[scan_patient] + sigma_width_scan * z_width;
   vector<lower=0>[n_scans] width_dip_s = exp(width_log_s);
 
-  //per-scan gamma shape parameter. Both arguments now vary: timing is gathered
-  //  from patient to scan, width is already per scan.
-  vector[n_scans] c_dip_s = gamma_c(tp_dip_p[scan_patient], width_dip_s);
+  //per-scan gamma shape. Both arguments are now per scan.
+  vector[n_scans] c_dip_s = gamma_c(tp_dip_s, width_dip_s);
 
-  //per-patient noise SD, back on the natural scale
   vector<lower=0>[n_ppl] sigma_p = exp(mu_log_sigma + sigma_log_sigma * z_sigma);
 }
 
 model{
-  //tp dip priors. exp(2.4) ~ 11 TR, matching the old pooled normal(11, 3).
-  //  sigma_tp of 0.2 allows roughly 9-13 TR at 1sd. THIS IS A GUESS and may be
-  //  too tight: the empirical per-scan trough spans [10.0, 19.8] at the IQR.
-  //  If the posterior presses against the top of this prior, widen it.
-  mu_tp_log ~ normal(2.4, 0.3);
-  sigma_tp  ~ normal(0, 0.3);              // was 0.05
-  tp_log    ~ normal(mu_tp_log, sigma_tp); // replaces z_tp_p ~ std_normal()
+  //tp priors. exp(2.4) ~ 11 TR. sigma_tp is loose -- the bound on tp_log, not
+  //  the prior, keeps patients in range.
+  mu_tp_log     ~ normal(2.4, 0.3);
 
-  //width priors, mirroring beta's 3-level structure.
-  //  mu_width_log centered so exp(mu_width_log) ~ 5 TR, matching the old
-  //  pooled width_dip ~ normal(5, 2) prior. sigma_width / sigma_width_scan
-  //  are first-pass guesses -- validate with prior predictive before trusting.
+
+  //sigma_tp_scan is a GUESS, deliberately tight (~15% at 1sd, ~+-2 TR at 11).
+  //  The patient bound does not reach the scan level, so this is the only
+  //  constraint on scan drift. If it presses, bound tp_log_s rather than widen.
+  sigma_tp_scan ~ normal(0, 0.1);
+  tp_log_s ~ normal(mu_tp_log, sigma_tp_scan);
+
+  //width priors. exp(1.6) ~ 5 TR.
   mu_width_log      ~ normal(1.6, 0.3);
   sigma_width       ~ normal(0, 0.3);
   z_width_p         ~ std_normal();
   sigma_width_scan  ~ normal(0, 0.3);
-  z_width           ~ std_normal();     // non-centered; real prior is normal(width_log, sigma_width_scan)
+  z_width           ~ std_normal();
 
-  //beta priors
-  mu_beta_log     ~ normal(0.55, 0.28);  // dip depth between 1 and 3 BOLD units
-  beta_gender     ~ normal(0, 0.2);      // the prior on difference between genders
-  sigma_beta      ~ normal(0, 0.2);      // fractional SD across patients
-  z_beta_p        ~ std_normal();        // non-centered; real prior is normal(mu_beta_log + beta_gender*gender, sigma_beta)
-  sigma_beta_scan ~ normal(0, 0.5);      // fractional SD across scans within patient; PRIOR IS A GUESS
-  z_beta          ~ std_normal();        // non-centered; real prior is normal(beta_log, sigma_beta_scan)
+  //beta priors. exp(0.55) ~ 1.7 BOLD units.
+  mu_beta_log     ~ normal(0.55, 0.28);
+  beta_gender     ~ normal(0, 0.2);
+  sigma_beta      ~ normal(0, 0.2);
+  z_beta_p        ~ std_normal();
+  sigma_beta_scan ~ normal(0, 0.5);     // PRIOR IS A GUESS
+  z_beta          ~ std_normal();
 
-  //per-patient noise priors.
-  //  exp(0.6) ~ 1.8, the pooled-sigma posterior from the previous fit.
-  //  sigma_log_sigma of 0.5 allows a ~2.7x spread between quiet and noisy
-  //  patients at 1sd.
+  //noise priors. exp(0.6) ~ 1.8.
   mu_log_sigma     ~ normal(0.6, 0.5);
   sigma_log_sigma  ~ normal(0, 0.5);
-  z_sigma          ~ std_normal();      // non-centered; real prior is lognormal(mu_log_sigma, sigma_log_sigma)
+  z_sigma          ~ std_normal();
 
-  //loc is gathered from patient to obs; c_dip_s from scan to obs.
-  vector[n_obs] mu = -beta_s[scan] .* gamma_loc_sigma(x, tp_dip_p[obs_patient], c_dip_s[scan]);
+  vector[n_obs] mu = -beta_s[scan] .* gamma_loc_sigma(x, tp_dip_s[scan], c_dip_s[scan]);
 
-  //likelihood -- each observation scored against its own patient's noise SD.
-  //  sigma_p[obs_patient] gathers the length-n_ppl vector out to length n_obs;
-  //  still a single vectorized normal_lpdf call.
   y ~ normal(mu, sigma_p[obs_patient]);
 }
 
 generated quantities {
-  // boy-girl difference in dip depth, BOLD units.
-  // positive = boys dip deeper (beta is magnitude; sign applied in mu).
-  // unaffected by the scan level: gender is a patient attribute, and both
-  // terms are population-level.
+  // boy-girl difference in dip depth, BOLD units. Positive = boys dip deeper.
   real mem_gender = exp(mu_beta_log + 0.5*beta_gender)
                   - exp(mu_beta_log - 0.5*beta_gender);
 
-  // median patient's noise SD, for comparison against the pooled-sigma fit.
-  // NB this is the MEDIAN, not the mean: the mean of a lognormal sits above it.
-  real sigma_median = exp(mu_log_sigma);
-
-  // population median dip width, in TRs -- for comparison against the old
-  // pooled width_dip posterior.
-  real width_median = exp(mu_width_log);
-
-  // population median dip timing, in TRs -- for comparison against the old
-  // pooled tp_dip posterior (10.28).
-  real tp_median = exp(mu_tp_log);
+  real sigma_median = exp(mu_log_sigma);   // MEDIAN patient noise SD, not mean
+  real width_median = exp(mu_width_log);   // population median width, TRs
+  real tp_median    = exp(mu_tp_log);      // population median timing, TRs
 }
