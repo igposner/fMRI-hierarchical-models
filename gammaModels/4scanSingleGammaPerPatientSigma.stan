@@ -49,11 +49,8 @@ functions {
   }
 }
 
-//single-gamma dip; tests the effect of gender on beta (the amplitude).
-//scans modeled individually, with scan-level random effects on timing,
-//  amplitude and width nested within patient.
-//tp:    population -> patient (centered, bounded 4-25 TR) -> scan (non-centered)
-//width: population -> patient (non-centered) -> scan (non-centered)
+//tp:    population -> scan (centered, bounded 4-28 TR)
+//width: population -> scan (non-centered)
 //beta:  population -> patient (non-centered) -> scan (non-centered)
 //noise: per patient, hierarchical on the log scale.
 data {
@@ -77,17 +74,14 @@ transformed data {
 }
 
 parameters {
-  //timing, log scale. Patient level sampled directly inside a hard bound;
-  //  scan level non-centered on top of it.
+  //timing, log scale. Population -> scan directly; no patient level.
   real mu_tp_log;
-  real<lower=0> sigma_tp_scan;                           // within patient
-  vector<lower=log(4), upper=log(28)>[n_scans] tp_log_s; // scan level, bounded
+  real<lower=0> sigma_tp_scan;                           // scan-to-scan
+  vector[n_scans] tp_log_s; // scan level, bounded
 
-  //width -> SD of the curve in TRs, log scale.
+  //width -> SD of the curve in TRs, log scale. Population -> scan directly.
   real mu_width_log;
-  real<lower=0> sigma_width;        // between patients
-  vector[n_ppl] z_width_p;          // patient level, non-centered
-  real<lower=0> sigma_width_scan;   // within patient
+  real<lower=0> sigma_width_scan;   // scan-to-scan
   vector[n_scans] z_width;          // scan level, non-centered
 
   //amplitude, log scale.
@@ -105,41 +99,33 @@ parameters {
 }
 
 transformed parameters {
-  //scan-level timing: patient term + scan offset. This is what the model uses.
+  //scan-level timing. This is what the model uses.
   vector<lower=0>[n_scans] tp_dip_s = exp(tp_log_s);
 
-  vector[n_ppl] width_log = mu_width_log + sigma_width * z_width_p;
-  vector[n_ppl] beta_log  = mu_beta_log + beta_gender * gender + sigma_beta * z_beta_p;
+  vector[n_ppl] beta_log = mu_beta_log + beta_gender * gender + sigma_beta * z_beta_p;
 
-  //expand patient values to one per scan, then offset each scan.
+  //expand patient depth to one per scan, then offset each scan.
   vector[n_scans] beta_log_s = beta_log[scan_patient] + sigma_beta_scan * z_beta;
   vector[n_scans] beta_s     = exp(beta_log_s);
 
-  vector[n_scans] width_log_s = width_log[scan_patient] + sigma_width_scan * z_width;
+  //width goes straight from population to scan.
+  vector[n_scans] width_log_s = mu_width_log + sigma_width_scan * z_width;
   vector<lower=0>[n_scans] width_dip_s = exp(width_log_s);
 
-  //per-scan gamma shape. Both arguments are now per scan.
+  //per-scan gamma shape. Both arguments are per scan.
   vector[n_scans] c_dip_s = gamma_c(tp_dip_s, width_dip_s);
 
   vector<lower=0>[n_ppl] sigma_p = exp(mu_log_sigma + sigma_log_sigma * z_sigma);
 }
 
 model{
-  //tp priors. exp(2.4) ~ 11 TR. sigma_tp is loose -- the bound on tp_log, not
-  //  the prior, keeps patients in range.
+  //tp priors. exp(2.4) ~ 11 TR.
   mu_tp_log     ~ normal(2.4, 0.3);
-
-
-  //sigma_tp_scan is a GUESS, deliberately tight (~15% at 1sd, ~+-2 TR at 11).
-  //  The patient bound does not reach the scan level, so this is the only
-  //  constraint on scan drift. If it presses, bound tp_log_s rather than widen.
-  sigma_tp_scan ~ normal(0, 0.1);
-  tp_log_s ~ normal(mu_tp_log, sigma_tp_scan);
+  sigma_tp_scan ~ normal(0, 1/sqrt(n_scans));
+  tp_log_s      ~ normal(mu_tp_log, sigma_tp_scan);
 
   //width priors. exp(1.6) ~ 5 TR.
   mu_width_log      ~ normal(1.6, 0.3);
-  sigma_width       ~ normal(0, 0.3);
-  z_width_p         ~ std_normal();
   sigma_width_scan  ~ normal(0, 0.3);
   z_width           ~ std_normal();
 
